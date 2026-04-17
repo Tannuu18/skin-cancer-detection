@@ -10,6 +10,7 @@ app = Flask(__name__)
 CORS(app)  
 
 BASE_DIR = Path(__file__).resolve().parent
+IMAGE_SIZE = (128, 128)
 
 # ---- Sakaguchi Loss ----
 sakaguchi_matrix = np.array([
@@ -30,12 +31,20 @@ def sakaguchi_loss(y_true, y_pred):
     penalty = tf.reduce_mean(tf.square(y_pred - similarity))
     return ce + 0.2 * penalty
 
-# ---- Build Model ----
+# ---- Build Lesion Model ----
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
 from tensorflow.keras.models import Model
 
-base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+
+class DenseCompat(Dense):
+    @classmethod
+    def from_config(cls, config):
+        # Keras 3 may fail on older H5 configs that include this key.
+        config.pop("quantization_config", None)
+        return super().from_config(config)
+
+base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(128, 128, 3))
 base_model.trainable = False
 
 x = base_model.output
@@ -47,18 +56,50 @@ non_membership = Dense(7, activation='sigmoid', name='non_membership')(x)
 
 model = Model(inputs=base_model.input, outputs=[membership, non_membership])
 
-# ---- Load Weights ----
+# ---- Load Models Once at Startup ----
 model.load_weights("model_weights.weights.h5")
+melanoma_stage_model = tf.keras.models.load_model(
+    "melanoma_stage_model.h5",
+    compile=False,
+    custom_objects={"Dense": DenseCompat}
+)
 
 labels = ['nv', 'mel', 'bkl', 'bcc', 'akiec', 'vasc', 'df']
+stage_labels = ["Low", "Intermediate", "High"]
 
-model.compile(
-    optimizer='adam',
-    loss={
-        'membership': sakaguchi_loss,
-        'non_membership': 'binary_crossentropy'
+def preprocess_image(file_stream):
+    img = Image.open(file_stream).convert("RGB")
+    img = img.resize(IMAGE_SIZE)
+    img = np.asarray(img, dtype=np.float32) / 255.0
+    return np.expand_dims(img, axis=0)
+
+
+def predict_lesion_and_stage(image_batch):
+    membership_pred, _ = model(image_batch, training=False)
+    membership_pred = membership_pred.numpy()[0]
+
+    lesion_idx = int(np.argmax(membership_pred))
+    lesion_type = labels[lesion_idx]
+    lesion_confidence = float(np.max(membership_pred))
+
+    if lesion_type != "mel":
+        return {
+            "type": lesion_type,
+            "confidence": lesion_confidence
+        }
+
+    stage_pred = melanoma_stage_model(image_batch, training=False)
+    if isinstance(stage_pred, (list, tuple)):
+        stage_pred = stage_pred[0]
+    stage_pred = stage_pred.numpy()[0]
+
+    stage_idx = int(np.argmax(stage_pred))
+    return {
+        "type": "mel",
+        "confidence": lesion_confidence,
+        "stage": stage_labels[stage_idx],
+        "stage_confidence": float(np.max(stage_pred))
     }
-)
 
 # ---- Routes ----
 @app.route('/')
@@ -76,22 +117,9 @@ def predict():
         return jsonify({"error": "Empty file"}), 400
 
     try:
-        # Read image
-        img = Image.open(file.stream).convert("RGB")
-        img = img.resize((224, 224))
-        img = np.array(img) / 255.0
-        img = np.expand_dims(img, axis=0)
-
-        # Predict
-        membership_pred, _ = model.predict(img)
-
-        pred_class = int(np.argmax(membership_pred))
-        confidence = float(np.max(membership_pred))
-
-        return jsonify({
-            "prediction": labels[pred_class],
-            "confidence": confidence
-        })
+        image_batch = preprocess_image(file.stream)
+        response = predict_lesion_and_stage(image_batch)
+        return jsonify(response)
 
     except Exception as e:
         print("Prediction error:\n" + traceback.format_exc())

@@ -384,7 +384,7 @@
             <section class="intro">
                 <div>
                     <div class="eyebrow">AI-assisted skin analysis</div>
-                    <h1>Modern skin lesion screening with a clean clinical interface.</h1>
+                    <h1>Modern skin lesion Prediction</h1>
                     <p class="lede">
                         Upload a dermoscopic or clinical image, get a prediction from the model,
                         and review confidence in a focused, high-contrast workspace designed for quick reading.
@@ -546,14 +546,19 @@ async function uploadImage() {
             throw new Error(message);
         }
 
-        if (!data || typeof data.prediction === 'undefined' || typeof data.confidence === 'undefined') {
+        if (!data || typeof data.type === 'undefined' || typeof data.confidence === 'undefined') {
             throw new Error('Server returned an empty or invalid response. Check Flask console logs.');
         }
 
         result.classList.remove('error');
         result.classList.add('good');
-        result.innerText = `Prediction: ${data.prediction}`;
-        helperText.innerText = `Confidence: ${(data.confidence * 100).toFixed(2)}%`;
+        if (typeof data.stage !== 'undefined') {
+            result.innerText = `Detected: Melanoma\nStage: ${data.stage}`;
+            helperText.innerText = `Lesion confidence: ${(data.confidence * 100).toFixed(2)}% | Stage confidence: ${(data.stage_confidence * 100).toFixed(2)}%`;
+        } else {
+            result.innerText = `Detected: ${data.type}`;
+            helperText.innerText = `Confidence: ${(data.confidence * 100).toFixed(2)}%`;
+        }
     } catch (error) {
         result.classList.remove('good');
         result.classList.add('error');
